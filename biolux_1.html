@@ -1,0 +1,675 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>BIOLUX — Ecosistema Vivo</title>
+<link href="https://fonts.googleapis.com/css2?family=Italiana&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{width:100%;height:100%;background:#000;overflow:hidden;cursor:none}
+canvas{display:block;position:fixed;inset:0}
+#overlay{
+  position:fixed;inset:0;pointer-events:none;z-index:10;
+  display:grid;grid-template-rows:auto 1fr auto;padding:2rem 2.5rem;
+}
+.top-bar{display:flex;justify-content:space-between;align-items:flex-start}
+#logo{
+  font-family:'Italiana',serif;font-size:clamp(1.4rem,3vw,2.2rem);
+  letter-spacing:8px;color:rgba(255,255,255,.07);
+  animation:logoIn 2s cubic-bezier(.22,1,.36,1) both;
+}
+@keyframes logoIn{from{opacity:0;letter-spacing:20px}to{opacity:1;letter-spacing:8px}}
+#stats{
+  font-family:'Share Tech Mono',monospace;font-size:.62rem;
+  letter-spacing:2px;color:rgba(255,255,255,.18);
+  display:flex;flex-direction:column;align-items:flex-end;gap:.3rem;
+  animation:fadeIn 2s 1s both;
+}
+.stat-row{display:flex;gap:.8rem;align-items:center}
+.dot{width:6px;height:6px;border-radius:50%;display:inline-block}
+#bottom-bar{
+  display:flex;justify-content:center;gap:2.5rem;
+  font-family:'Share Tech Mono',monospace;font-size:.55rem;
+  letter-spacing:3px;color:rgba(255,255,255,.15);
+  animation:fadeIn 3s 1.5s both;
+}
+.cmd{display:flex;align-items:center;gap:.5rem}
+.cmd kbd{
+  border:1px solid rgba(255,255,255,.12);
+  padding:.15rem .4rem;border-radius:3px;
+  font-family:inherit;font-size:.5rem;
+}
+@keyframes fadeIn{from{opacity:0}to{opacity:1}}
+#gen-counter{
+  position:fixed;top:50%;left:2.5rem;transform:translateY(-50%);
+  font-family:'Share Tech Mono',monospace;font-size:.55rem;
+  letter-spacing:4px;color:rgba(255,255,255,.1);
+  writing-mode:vertical-lr;pointer-events:none;z-index:10;
+  animation:fadeIn 3s 2s both;
+}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="overlay">
+  <div class="top-bar">
+    <div id="logo">BIOLUX</div>
+    <div id="stats">
+      <div class="stat-row"><span class="dot" style="background:#4fffb0"></span><span id="s-cells">0 células</span></div>
+      <div class="stat-row"><span class="dot" style="background:#ff6b4a"></span><span id="s-pred">0 depredadores</span></div>
+      <div class="stat-row"><span class="dot" style="background:#a78bfa"></span><span id="s-gen">gen 0</span></div>
+    </div>
+  </div>
+  <div></div>
+  <div id="bottom-bar">
+    <div class="cmd"><kbd>CLIC</kbd> sembrar vida</div>
+    <div class="cmd"><kbd>HOLD</kbd> pulso de energía</div>
+    <div class="cmd"><kbd>2×CLIC</kbd> depredador</div>
+    <div class="cmd"><kbd>R</kbd> reiniciar</div>
+  </div>
+</div>
+<div id="gen-counter">GENERACIÓN 000</div>
+
+<script>
+/* ══════════════════════════════════════════════
+   BIOLUX — Ecosistema de Vida Artificial
+   Células autónomas con: ADN, hambre, reproducción,
+   predadores, feromonas, bioluminiscencia reactiva
+══════════════════════════════════════════════ */
+const CV = document.getElementById('c');
+const G  = CV.getContext('2d');
+let W, H;
+const sCells = document.getElementById('s-cells');
+const sPred  = document.getElementById('s-pred');
+const sGen   = document.getElementById('s-gen');
+const genCtr = document.getElementById('gen-counter');
+
+function resize(){
+  W = CV.width  = window.innerWidth;
+  H = CV.height = window.innerHeight;
+}
+resize();
+window.addEventListener('resize', resize);
+
+/* ── GLOBALS ── */
+const mouse = {x:W/2,y:H/2,down:false,pressure:0};
+let generation = 0;
+let tick = 0;
+
+/* ── COLOR PALETTES ── */
+const CELL_HUES   = [160,180,140,200,120]; // greens/teals
+const PRED_HUES   = [0,15,340,25];          // reds/oranges
+const FOOD_HUES   = [60,80,50,90];          // yellows
+
+/* ══════════════
+   FEROMONA MAP
+   (grid-based trail)
+══════════════ */
+const FGRID = 40; // cell size of pheromone grid
+let fGrid, fW, fH;
+function initFGrid(){
+  fW = Math.ceil(W/FGRID);
+  fH = Math.ceil(H/FGRID);
+  fGrid = new Float32Array(fW * fH);
+}
+initFGrid();
+function addPhero(x,y,v){
+  const fx = (x/FGRID)|0, fy = (y/FGRID)|0;
+  if(fx<0||fy<0||fx>=fW||fy>=fH) return;
+  fGrid[fy*fW+fx] = Math.min(1, fGrid[fy*fW+fx]+v);
+}
+function getPhero(x,y){
+  const fx = (x/FGRID)|0, fy = (y/FGRID)|0;
+  if(fx<0||fy<0||fx>=fW||fy>=fH) return 0;
+  return fGrid[fy*fW+fx];
+}
+function decayPhero(){
+  for(let i=0;i<fGrid.length;i++) fGrid[i] *= 0.985;
+}
+
+/* ══════════════
+   DNA
+══════════════ */
+function randomDNA(){
+  return {
+    speed:     0.8 + Math.random()*2.2,
+    size:      3   + Math.random()*5,
+    turnRate:  0.02+ Math.random()*0.08,
+    senseRange:40  + Math.random()*80,
+    glowPulse: 0.5 + Math.random()*2,
+    repro:     0.4 + Math.random()*0.5,   // 0-1 how fast they reproduce
+    hueIdx:    Math.floor(Math.random()*CELL_HUES.length),
+    aggro:     Math.random(),              // tendency to chase
+  };
+}
+function mutateDNA(dna, rate=0.15){
+  const d = {...dna};
+  if(Math.random()<rate) d.speed     = Math.max(.3, d.speed     +(Math.random()-.5)*.5);
+  if(Math.random()<rate) d.size      = Math.max(1.5,d.size      +(Math.random()-.5)*1.2);
+  if(Math.random()<rate) d.turnRate  = Math.max(.01,d.turnRate  +(Math.random()-.5)*.02);
+  if(Math.random()<rate) d.senseRange= Math.max(20, d.senseRange+(Math.random()-.5)*20);
+  if(Math.random()<rate) d.glowPulse = Math.max(.2, d.glowPulse +(Math.random()-.5)*.5);
+  if(Math.random()<rate) d.repro     = Math.max(.1, Math.min(1,d.repro+(Math.random()-.5)*.2));
+  if(Math.random()<rate) d.aggro     = Math.max(0,  Math.min(1,d.aggro+(Math.random()-.5)*.3));
+  if(Math.random()<rate) d.hueIdx    = Math.floor(Math.random()*CELL_HUES.length);
+  return d;
+}
+
+/* ══════════════
+   FOOD PELLET
+══════════════ */
+class Food {
+  constructor(x,y){
+    this.x = x ?? Math.random()*W;
+    this.y = y ?? Math.random()*H;
+    this.r = 2 + Math.random()*3;
+    this.energy = .5+Math.random()*.5;
+    this.hue = FOOD_HUES[Math.floor(Math.random()*FOOD_HUES.length)];
+    this.age = 0;
+    this.dead = false;
+    this.pulse = Math.random()*Math.PI*2;
+  }
+  update(){
+    this.age++;
+    this.pulse += 0.04;
+    if(this.age > 1800+Math.random()*600) this.dead = true;
+  }
+  draw(){
+    const p = .5+.5*Math.sin(this.pulse);
+    const glow = G.createRadialGradient(this.x,this.y,0,this.x,this.y,this.r*(3+p*2));
+    glow.addColorStop(0,`hsla(${this.hue},100%,75%,${.6*this.energy})`);
+    glow.addColorStop(.4,`hsla(${this.hue},100%,60%,${.2*this.energy})`);
+    glow.addColorStop(1,'rgba(0,0,0,0)');
+    G.beginPath(); G.arc(this.x,this.y,this.r*(3+p*2),0,Math.PI*2);
+    G.fillStyle = glow; G.fill();
+    G.beginPath(); G.arc(this.x,this.y,this.r*(1+p*.3),0,Math.PI*2);
+    G.fillStyle = `hsla(${this.hue},100%,85%,${.8+p*.2})`;
+    G.fill();
+  }
+}
+
+/* ══════════════
+   CELL (organism)
+══════════════ */
+class Cell {
+  constructor(x,y,dna,isPred=false){
+    this.x = x ?? Math.random()*W;
+    this.y = y ?? Math.random()*H;
+    this.dna = dna ?? randomDNA();
+    this.isPred = isPred;
+    this.angle = Math.random()*Math.PI*2;
+    this.vx = 0; this.vy = 0;
+    this.energy = 0.6+Math.random()*.4;
+    this.age = 0;
+    this.reproTimer = 0;
+    this.pulse = Math.random()*Math.PI*2;
+    this.trail = [];
+    this.dead = false;
+    this.hue = isPred
+      ? PRED_HUES[Math.floor(Math.random()*PRED_HUES.length)]
+      : CELL_HUES[this.dna.hueIdx];
+    this.size = this.dna.size * (isPred ? 1.8 : 1);
+    this.flashTimer = 0; // glow on eat
+    this.membraneAngle = 0;
+    this.segments = 6 + Math.floor(this.dna.size/2);
+    this.segOffsets = Array.from({length:this.segments},()=>Math.random()*Math.PI*2);
+  }
+
+  sense(foods, cells){
+    /* find nearest target */
+    let nearestFood = null, nearestCell = null;
+    let minFd = 1e9, minCd = 1e9;
+    const sr2 = this.dna.senseRange * this.dna.senseRange;
+
+    if(!this.isPred){
+      for(const f of foods){
+        const dx=f.x-this.x, dy=f.y-this.y;
+        const d2=dx*dx+dy*dy;
+        if(d2<sr2 && d2<minFd){ minFd=d2; nearestFood=f; }
+      }
+      // flee from predators
+      for(const c of cells){
+        if(!c.isPred||c.dead) continue;
+        const dx=c.x-this.x, dy=c.y-this.y;
+        const d2=dx*dx+dy*dy;
+        const flee = this.dna.senseRange*1.6; if(d2<flee*flee && d2<minCd){ minCd=d2; nearestCell=c; }
+      }
+    } else {
+      // predator chases cells
+      for(const c of cells){
+        if(c.isPred||c.dead) continue;
+        const dx=c.x-this.x, dy=c.y-this.y;
+        const d2=dx*dx+dy*dy;
+        if(d2<sr2 && d2<minCd){ minCd=d2; nearestCell=c; }
+      }
+    }
+    return {nearestFood, nearestCell, minFd, minCd};
+  }
+
+  steer(tx, ty, strength=1){
+    const dx=tx-this.x, dy=ty-this.y;
+    const d=Math.sqrt(dx*dx+dy*dy)||1;
+    const targetAngle = Math.atan2(dy,dx);
+    let da = targetAngle - this.angle;
+    while(da> Math.PI) da-=Math.PI*2;
+    while(da<-Math.PI) da+=Math.PI*2;
+    this.angle += da * this.dna.turnRate * strength;
+  }
+
+  update(foods, cells, spawn){
+    if(this.dead) return;
+    this.age++;
+    this.pulse += this.dna.glowPulse * 0.05;
+    this.membraneAngle += 0.02;
+    if(this.flashTimer>0) this.flashTimer--;
+
+    /* SENSE */
+    const {nearestFood, nearestCell, minFd, minCd} = this.sense(foods, cells);
+
+    /* STEER */
+    if(!this.isPred){
+      if(nearestCell){
+        // flee
+        this.steer(2*this.x-nearestCell.x, 2*this.y-nearestCell.y, 1.5);
+      } else if(nearestFood){
+        this.steer(nearestFood.x, nearestFood.y, 1.2);
+      } else {
+        // wander with pheromone trail following
+        const ph = getPhero(this.x+Math.cos(this.angle)*30, this.y+Math.sin(this.angle)*30);
+        this.angle += (Math.random()-.5)*this.dna.turnRate*(1-ph*.5)*3;
+      }
+    } else {
+      if(nearestCell){
+        this.steer(nearestCell.x, nearestCell.y, 1.4);
+      } else {
+        this.angle += (Math.random()-.5)*this.dna.turnRate*2.5;
+      }
+    }
+
+    /* MOUSE INFLUENCE */
+    if(mouse.down && mouse.pressure>0){
+      const dx=mouse.x-this.x, dy=mouse.y-this.y;
+      const d=Math.sqrt(dx*dx+dy*dy)||1;
+      if(d<200){
+        const force = (1-d/200)*mouse.pressure*0.8;
+        this.angle = Math.atan2(dy,dx);
+        this.energy = Math.min(1, this.energy+force*.02);
+      }
+    }
+
+    /* MOVE */
+    const spd = this.dna.speed * (0.7+this.energy*.6) * (this.isPred?1.3:1);
+    this.vx += Math.cos(this.angle)*spd*.15;
+    this.vy += Math.sin(this.angle)*spd*.15;
+    this.vx *= 0.88; this.vy *= 0.88;
+    const v = Math.sqrt(this.vx*this.vx+this.vy*this.vy);
+    if(v>spd){ this.vx=this.vx/v*spd; this.vy=this.vy/v*spd; }
+
+    this.x += this.vx; this.y += this.vy;
+
+    /* WRAP */
+    if(this.x<-20) this.x=W+20; if(this.x>W+20) this.x=-20;
+    if(this.y<-20) this.y=H+20; if(this.y>H+20) this.y=-20;
+
+    /* TRAIL */
+    if(this.age%3===0){
+      this.trail.push({x:this.x,y:this.y,e:this.energy});
+      if(this.trail.length>18) this.trail.shift();
+      addPhero(this.x, this.y, .08);
+    }
+
+    /* EAT FOOD */
+    if(!this.isPred){
+      for(let i=foods.length-1;i>=0;i--){
+        const f=foods[i];
+        const dx=f.x-this.x, dy=f.y-this.y;
+        if(dx*dx+dy*dy < (this.size+f.r)*(this.size+f.r)){
+          this.energy = Math.min(1, this.energy+f.energy*.4);
+          this.flashTimer = 12;
+          f.dead = true;
+          foods.splice(i,1);
+          break;
+        }
+      }
+    }
+
+    /* EAT CELLS (predator) */
+    if(this.isPred){
+      for(const c of cells){
+        if(c.isPred||c.dead) continue;
+        const dx=c.x-this.x, dy=c.y-this.y;
+        if(dx*dx+dy*dy < (this.size+c.size)*(this.size+c.size)){
+          this.energy = Math.min(1, this.energy+.4);
+          this.flashTimer = 20;
+          c.dead = true;
+          // food burst on death
+          for(let k=0;k<3;k++) foods.push(new Food(c.x+(Math.random()-.5)*20,c.y+(Math.random()-.5)*20));
+        }
+      }
+    }
+
+    /* ENERGY DRAIN */
+    this.energy -= 0.0012 * (this.isPred?1.4:1) * (1+this.dna.speed*.1);
+    if(this.energy<=0 || this.age>3000+Math.random()*2000) {
+      this.dead=true;
+      if(!this.isPred) for(let k=0;k<2;k++) foods.push(new Food(this.x,this.y));
+      return;
+    }
+
+    /* REPRODUCE */
+    this.reproTimer++;
+    const reproRate = Math.floor(280 / this.dna.repro);
+    if(this.reproTimer>reproRate && this.energy>.6 && !this.isPred){
+      this.reproTimer=0;
+      this.energy -= .25;
+      generation++;
+      spawn(new Cell(
+        this.x+(Math.random()-.5)*30,
+        this.y+(Math.random()-.5)*30,
+        mutateDNA(this.dna)
+      ));
+    }
+  }
+
+  draw(){
+    if(this.dead) return;
+    const p = .5+.5*Math.sin(this.pulse);
+    const flash = this.flashTimer/20;
+    const hue = this.hue + (flash*30);
+    const brightness = this.isPred ? 65+flash*20 : 70+flash*15;
+    const alpha = .7+this.energy*.3;
+
+    /* trail */
+    if(this.trail.length>1){
+      G.save();
+      G.lineCap='round';
+      for(let i=1;i<this.trail.length;i++){
+        const t=(i/this.trail.length);
+        G.strokeStyle=`hsla(${hue},100%,${brightness}%,${t*this.trail[i].e*.3})`;
+        G.lineWidth=this.size*(t*.8);
+        G.beginPath();
+        G.moveTo(this.trail[i-1].x,this.trail[i-1].y);
+        G.lineTo(this.trail[i].x,this.trail[i].y);
+        G.stroke();
+      }
+      G.restore();
+    }
+
+    /* outer glow */
+    const glowR = this.size*(4+p*3+flash*4);
+    const og = G.createRadialGradient(this.x,this.y,0,this.x,this.y,glowR);
+    og.addColorStop(0,`hsla(${hue},100%,${brightness}%,${.15+flash*.2+p*.05})`);
+    og.addColorStop(.5,`hsla(${hue},100%,${brightness}%,${.05+p*.02})`);
+    og.addColorStop(1,'rgba(0,0,0,0)');
+    G.beginPath(); G.arc(this.x,this.y,glowR,0,Math.PI*2);
+    G.fillStyle=og; G.fill();
+
+    /* organic membrane (wobbly polygon) */
+    G.save();
+    G.beginPath();
+    const n = this.segments;
+    for(let i=0;i<=n;i++){
+      const seg = i%n;
+      const baseAngle = (seg/n)*Math.PI*2+this.membraneAngle*.3;
+      const wobble = Math.sin(this.segOffsets[seg]+tick*.04)*this.size*.35;
+      const r = this.size*(1.1+p*.2) + wobble;
+      const px = this.x+Math.cos(baseAngle)*r;
+      const py = this.y+Math.sin(baseAngle)*r;
+      i===0 ? G.moveTo(px,py) : G.lineTo(px,py);
+    }
+    G.closePath();
+    const bodyG = G.createRadialGradient(
+      this.x-this.size*.2, this.y-this.size*.2, 0,
+      this.x, this.y, this.size*1.4
+    );
+    bodyG.addColorStop(0,`hsla(${hue+20},100%,${brightness+15}%,${alpha})`);
+    bodyG.addColorStop(.6,`hsla(${hue},100%,${brightness}%,${alpha*.9})`);
+    bodyG.addColorStop(1,`hsla(${hue-20},80%,${brightness-10}%,${alpha*.5})`);
+    G.fillStyle=bodyG; G.fill();
+
+    /* nucleus */
+    if(!this.isPred){
+      const ng = G.createRadialGradient(this.x,this.y,0,this.x,this.y,this.size*.5);
+      ng.addColorStop(0,`hsla(${hue+40},100%,95%,.7)`);
+      ng.addColorStop(1,`hsla(${hue},100%,70%,.1)`);
+      G.beginPath(); G.arc(this.x,this.y,this.size*.45,0,Math.PI*2);
+      G.fillStyle=ng; G.fill();
+    } else {
+      // predator eye
+      G.beginPath(); G.arc(this.x,this.y,this.size*.5,0,Math.PI*2);
+      G.fillStyle=`rgba(0,0,0,.6)`; G.fill();
+      G.beginPath(); G.arc(this.x+this.size*.1,this.y-.1,this.size*.18,0,Math.PI*2);
+      G.fillStyle=`hsla(${hue+60},100%,90%,.9)`; G.fill();
+    }
+    G.restore();
+  }
+}
+
+/* ══════════════
+   WORLD
+══════════════ */
+let cells = [];
+let foods = [];
+
+function seedWorld(){
+  cells = [];
+  foods = [];
+  generation = 0;
+  tick = 0;
+  initFGrid();
+  for(let i=0;i<40;i++) cells.push(new Cell());
+  for(let i=0;i<80;i++) foods.push(new Food());
+}
+seedWorld();
+
+/* food spawner */
+let foodTimer = 0;
+function spawnFood(){
+  foodTimer++;
+  if(foodTimer%90===0 && foods.length<200){
+    foods.push(new Food());
+  }
+}
+
+/* ══════════════
+   BACKGROUND — deep ocean
+══════════════ */
+let bgC, bgX;
+function buildBg(){
+  bgC = document.createElement('canvas');
+  bgC.width=W; bgC.height=H;
+  bgX = bgC.getContext('2d');
+  const g = bgX.createRadialGradient(W/2,H*.3,0,W/2,H*.6,Math.max(W,H)*.9);
+  g.addColorStop(0,'#001a14');
+  g.addColorStop(.4,'#000d1a');
+  g.addColorStop(.7,'#00050f');
+  g.addColorStop(1,'#000003');
+  bgX.fillStyle=g; bgX.fillRect(0,0,W,H);
+  // caustics
+  for(let i=0;i<60;i++){
+    const cx2=Math.random()*W, cy2=Math.random()*H;
+    const r=20+Math.random()*80;
+    const cg=bgX.createRadialGradient(cx2,cy2,0,cx2,cy2,r);
+    cg.addColorStop(0,'rgba(0,255,160,.015)');
+    cg.addColorStop(1,'rgba(0,0,0,0)');
+    bgX.beginPath(); bgX.arc(cx2,cy2,r,0,Math.PI*2);
+    bgX.fillStyle=cg; bgX.fill();
+  }
+}
+buildBg();
+
+/* ══════════════
+   PHEROMONE RENDER
+══════════════ */
+function drawPhero(){
+  G.save();
+  G.globalAlpha=.08;
+  for(let y=0;y<fH;y++){
+    for(let x=0;x<fW;x++){
+      const v=fGrid[y*fW+x];
+      if(v<.05) continue;
+      G.fillStyle=`rgba(100,255,180,${v})`;
+      G.fillRect(x*FGRID, y*FGRID, FGRID, FGRID);
+    }
+  }
+  G.restore();
+}
+
+/* ══════════════
+   CURSOR
+══════════════ */
+let curTick=0;
+function drawCursor(){
+  curTick++;
+  const p = .5+.5*Math.sin(curTick*.08);
+  G.save();
+  // outer pulse ring
+  G.strokeStyle=`rgba(100,255,180,${.1+p*.15})`;
+  G.lineWidth=1;
+  G.beginPath(); G.arc(mouse.x,mouse.y,24+p*8,0,Math.PI*2); G.stroke();
+  // spinning hex
+  for(let i=0;i<6;i++){
+    const a=curTick*.03+i/6*Math.PI*2;
+    G.strokeStyle=`rgba(100,255,180,${.25+p*.2})`;
+    G.lineWidth=1;
+    G.beginPath();
+    G.arc(mouse.x+Math.cos(a)*16, mouse.y+Math.sin(a)*16, 1.5,0,Math.PI*2);
+    G.stroke();
+  }
+  // center
+  const cg=G.createRadialGradient(mouse.x,mouse.y,0,mouse.x,mouse.y,8);
+  cg.addColorStop(0,`rgba(150,255,200,${.8+p*.2})`);
+  cg.addColorStop(1,'rgba(0,0,0,0)');
+  G.beginPath(); G.arc(mouse.x,mouse.y,8,0,Math.PI*2);
+  G.fillStyle=cg; G.fill();
+  G.restore();
+}
+
+/* ══════════════
+   ENERGY PULSE (click-hold)
+══════════════ */
+const pulses=[];
+function drawPulses(){
+  for(let i=pulses.length-1;i>=0;i--){
+    const p=pulses[i];
+    p.r+=6; p.life-=.02;
+    if(p.life<=0){pulses.splice(i,1);continue;}
+    G.save();
+    G.strokeStyle=`rgba(100,255,180,${p.life*.5})`;
+    G.lineWidth=2*p.life;
+    G.shadowBlur=10; G.shadowColor='rgba(100,255,180,.5)';
+    G.beginPath(); G.arc(p.x,p.y,p.r,0,Math.PI*2); G.stroke();
+    G.restore();
+  }
+}
+
+/* ══════════════
+   MAIN LOOP
+══════════════ */
+let frame=0;
+function loop(){
+  requestAnimationFrame(loop);
+  tick++; frame++;
+
+  G.drawImage(bgC,0,0);
+  decayPhero();
+  drawPhero();
+
+  // pressure
+  if(mouse.down) mouse.pressure=Math.min(1,mouse.pressure+.04);
+  else mouse.pressure=Math.max(0,mouse.pressure-.06);
+
+  // spawn pulse rings on hold
+  if(mouse.down && frame%8===0 && mouse.pressure>.2){
+    pulses.push({x:mouse.x,y:mouse.y,r:mouse.pressure*10,life:.8});
+  }
+
+  // update food
+  spawnFood();
+  for(let i=foods.length-1;i>=0;i--){
+    foods[i].update();
+    if(foods[i].dead) foods.splice(i,1);
+  }
+  foods.forEach(f=>f.draw());
+
+  // update cells
+  const newCells=[];
+  for(let i=cells.length-1;i>=0;i--){
+    cells[i].update(foods, cells, (c)=>newCells.push(c));
+    if(cells[i].dead){ cells.splice(i,1); continue; }
+    cells[i].draw();
+  }
+  // add children (limit pop)
+  for(const nc of newCells){
+    if(cells.length<300) cells.push(nc);
+  }
+
+  drawPulses();
+  drawCursor();
+
+  // HUD update
+  if(frame%20===0){
+    const cellCount = cells.filter(c=>!c.isPred).length;
+    const predCount = cells.filter(c=>c.isPred).length;
+    sCells.textContent = `${cellCount} células`;
+    sPred.textContent  = `${predCount} depredadores`;
+    sGen.textContent   = `gen ${generation}`;
+    genCtr.textContent = `GENERACIÓN ${String(generation).padStart(3,'0')}`;
+  }
+}
+
+/* ══════════════
+   EVENTS
+══════════════ */
+window.addEventListener('mousemove',e=>{mouse.x=e.clientX;mouse.y=e.clientY});
+window.addEventListener('mousedown',e=>{
+  mouse.down=true;
+  // spawn life cluster
+  for(let i=0;i<8;i++){
+    const c=new Cell(
+      e.clientX+(Math.random()-.5)*60,
+      e.clientY+(Math.random()-.5)*60
+    );
+    c.energy=.9;
+    if(cells.length<300) cells.push(c);
+  }
+  for(let i=0;i<5;i++) foods.push(new Food(e.clientX+(Math.random()-.5)*80,e.clientY+(Math.random()-.5)*80));
+});
+window.addEventListener('mouseup',()=>mouse.down=false);
+window.addEventListener('dblclick',e=>{
+  // spawn predator
+  const pred = new Cell(e.clientX,e.clientY,{
+    speed:2.5+Math.random(),size:7+Math.random()*4,
+    turnRate:.05,senseRange:120,glowPulse:1.5,
+    repro:.1,hueIdx:0,aggro:1
+  },true);
+  pred.energy=.95;
+  cells.push(pred);
+  pulses.push({x:e.clientX,y:e.clientY,r:5,life:1});
+});
+window.addEventListener('keydown',e=>{
+  if(e.key==='r'||e.key==='R') seedWorld();
+});
+
+// touch
+window.addEventListener('touchmove',e=>{
+  e.preventDefault();
+  const t=e.touches[0];
+  mouse.x=t.clientX;mouse.y=t.clientY;mouse.down=true;
+},{passive:false});
+window.addEventListener('touchstart',e=>{
+  const t=e.touches[0];
+  mouse.x=t.clientX;mouse.y=t.clientY;mouse.down=true;
+  for(let i=0;i<8;i++){
+    const c=new Cell(t.clientX+(Math.random()-.5)*60,t.clientY+(Math.random()-.5)*60);
+    c.energy=.9;
+    if(cells.length<300) cells.push(c);
+  }
+});
+window.addEventListener('touchend',()=>mouse.down=false);
+
+loop();
+</script>
+</body>
+</html>
